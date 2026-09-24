@@ -119,8 +119,6 @@ class SmsContext(SuperContext):
     victory = False
     checked_yoshi_egg = False
 
-    ap_nozzles_received = []
-
     # Current Shine/Blue Coins and Recv Shine/Blue Coin
     curr_shines: int = 0
     req_shine: int = 0
@@ -138,6 +136,13 @@ class SmsContext(SuperContext):
         self.has_send_death: bool = False
         self.has_receive_death: bool = False
         self.num_1_ups_current: int = 0
+        self.ap_nozzles_received: list[int] = []
+        # Location ids already sent to the server this connection; only the difference is sent.
+        self.locations_sent: set[int] = set()
+        # Received-item counts, recomputed only when items_received changes (see get_item_counts).
+        self._item_counts: collections.Counter[int] = collections.Counter()
+        self._item_counts_key: tuple[int, int] = (0, -1)
+        self._ui_state: tuple = ()
 
         from . import SuperMarioSunshineSettings
         settings: SuperMarioSunshineSettings = get_settings().sms_options
@@ -163,6 +168,9 @@ class SmsContext(SuperContext):
         super().on_package(cmd, args)
 
         if cmd == "Connected":
+            # Resend every known check once after a (re)connect; the server already sends the
+            # full ReceivedItems list on Connected, so no Sync is needed here.
+            self.locations_sent = set()
             slot_data = args.get("slot_data")
             self.goal = slot_data.get("required_shines")
             temp = slot_data.get("blue_coin_sanity")
@@ -191,6 +199,14 @@ class SmsContext(SuperContext):
         logger.info("Killing Mario now...")
         self.has_receive_death = True
         kill_mario(self)
+
+    def get_item_counts(self) -> collections.Counter[int]:
+        """Received-item counts by item id, cached until items_received changes."""
+        key = (id(self.items_received), len(self.items_received))
+        if key != self._item_counts_key:
+            self._item_counts = collections.Counter(item.item for item in self.items_received)
+            self._item_counts_key = key
+        return self._item_counts
 
     def get_corona_goal(self):
         if self.goal:
@@ -224,7 +240,7 @@ class SmsContext(SuperContext):
             def update_blue_coins(self, blue_coins: int, coins_req: int):
                 self.blue_coins.text = f"{blue_coins} / {coins_req}"
 
-            def update_ticket_list(self, ticket_list: set[str]):
+            def update_ticket_list(self, ticket_list: list[str]):
                 self.tickets.text = "; ".join(ticket_list)
 
         return SMSGuiWrapper
@@ -238,6 +254,8 @@ storedNozzleBoxes = []
 curNozzleBoxes = []
 
 DELAY_SECONDS = .5
+# Built once; get_location_name_to_id() rebuilds the whole table on every call.
+LOCATION_NAME_TO_ID: dict[str, int] = get_location_name_to_id()
 
 def read_string(console_address: int, strlen: int) -> str:
     return dme.read_bytes(console_address, strlen).split(b"\0", 1)[0].decode()
@@ -276,10 +294,17 @@ async def game_watcher(ctx: SmsContext):
         if "DeathLink" in ctx.tags:
             await check_death(ctx)
 
-        sync_msg = [{'cmd': 'Sync'}]
-        if ctx.locations_checked:
-            sync_msg.append({"cmd": "LocationChecks", "locations": list(ctx.locations_checked)})
-        await ctx.send_msgs(sync_msg)
+        # Sending Sync + every checked location each tick made the server stream the whole
+        # ReceivedItems list back five times a second, which grew memory without bound over
+        # long sessions (issue #66). Sync only on /resync, and only send checks that are new.
+        if ctx.syncing:
+            ctx.syncing = False
+            ctx.locations_sent = set()
+            await ctx.send_msgs([{"cmd": "Sync"}])
+        new_locations = ctx.locations_checked - ctx.locations_sent
+        if new_locations:
+            ctx.locations_sent |= new_locations
+            await ctx.send_msgs([{"cmd": "LocationChecks", "locations": list(new_locations)}])
 
         #Gravi01 Begin
         refresh_collection_counts(ctx)
@@ -405,17 +430,25 @@ async def dolphin_sync_task(ctx: SmsContext) -> None:
 
                 # If the client's ui has loaded
                 if ctx.ui:
-                    ctx.curr_shines = len([recv_item for recv_item in ctx.items_received if
-                        ctx.item_names.lookup_in_game(recv_item.item) == "Shine Sprite"])
-                    ctx.curr_blue_coins = len([recv_item for recv_item in ctx.items_received if
-                         ctx.item_names.lookup_in_game(recv_item.item) == "Blue Coin"])
-                    ctx.ui.update_corona_shine_count(ctx.curr_shines, ctx.req_shine)
-                    ctx.ui.update_blue_coins(ctx.curr_blue_coins, ctx.req_blue_coins)
+                    counts = ctx.get_item_counts()
+                    ctx.curr_shines = counts[523004]
+                    ctx.curr_blue_coins = counts[523014]
+                    ticket_list: list[str] = []
+                    if ctx.ticket_mode:
+                        ticket_list = [ctx.item_names.lookup_in_game(item_id).replace(" Ticket", "")
+                                       for item_id in sorted(counts)
+                                       if ctx.item_names.lookup_in_game(item_id) in TICKET_ITEMS]
+                    # Only touch the labels when something changed, not ten times a second.
+                    ui_state = (ctx.curr_shines, ctx.req_shine, ctx.curr_blue_coins, ctx.req_blue_coins,
+                                tuple(ticket_list))
+                    if ui_state != ctx._ui_state:
+                        ctx._ui_state = ui_state
+                        ctx.ui.update_corona_shine_count(ctx.curr_shines, ctx.req_shine)
+                        ctx.ui.update_blue_coins(ctx.curr_blue_coins, ctx.req_blue_coins)
+                        if ctx.ticket_mode:
+                            ctx.ui.update_ticket_list(ticket_list)
 
                     if ctx.ticket_mode:
-                        ticket_list: set[str] = set([ctx.item_names.lookup_in_game(recv_item.item).replace(" Ticket", "")
-                            for recv_item in ctx.items_received if ctx.item_names.lookup_in_game(recv_item.item) in TICKET_ITEMS])
-                        ctx.ui.update_ticket_list(ticket_list)
                         flag_pointer = dme.read_word(addresses.SMS_FLAGS_PTR)
                         boat_and_yoshi_flags = dme.read_byte(flag_pointer + addresses.DELFINO_YOSHI_OFFSET)
                         dme.write_byte(flag_pointer + addresses.DELFINO_YOSHI_OFFSET, boat_and_yoshi_flags | 0x02)
@@ -491,7 +524,8 @@ def send_victory(ctx: SmsContext):
         return
 
     ctx.victory = True
-    ctx.send_msgs([{"cmd": "StatusUpdate", "status": ClientStatus.CLIENT_GOAL}])
+    # game_watcher sends the StatusUpdate once ctx.victory is set; send_msgs is a coroutine and
+    # calling it here without awaiting only created a never-awaited coroutine.
     logger.info("Congratulations on completing your seed!")
     time.sleep(.05)
     logger.info("ARCHIPELAGO SUPER MARIO SUNSHINE CREDITS:")
@@ -548,14 +582,14 @@ def parse_bits(all_bits, ctx: SmsContext, parse_type: str):
                 if not possible_locs:
                     continue
 
-                ctx.locations_checked.add(get_location_name_to_id()[possible_locs[0]])
+                ctx.locations_checked.add(LOCATION_NAME_TO_ID[possible_locs[0]])
                 if DEBUG:
                     logger.info("checks to send: %s", possible_locs[0])
         elif x == 119:
             send_victory(ctx)
 
 def refresh_item_count(ctx, item_id, targ_address):
-    counts = collections.Counter(received_item.item for received_item in ctx.items_received)
+    counts = ctx.get_item_counts()
     temp = change_endian(counts[item_id])
     #Gravi01 Begin      #Stacktrace where the original Exception was thrown. Keeping the changes in this place as well, you still land here without connection, due to it being an async task
     if ctx.dolphin_status == CONNECTION_CONNECTED_STATUS:
@@ -569,7 +603,7 @@ def refresh_item_count(ctx, item_id, targ_address):
 
 
 def refresh_all_items(ctx: SmsContext):
-    counts = collections.Counter(received_item.item for received_item in ctx.items_received)
+    counts = ctx.get_item_counts()
     for item in counts:
         if counts[item] > 0:
             unpack_item(item, ctx)
@@ -692,7 +726,7 @@ def activate_yoshi(ctx):
 # Makes filler 1-UP items actually give lives
 # As of now, your life count is increased by 1 if you close the client and reconnect if you already have more than one 1-UP sent
 def increase_lives(ctx):
-    num_1_ups = sum(1 for item in ctx.items_received if ctx.item_names.lookup_in_game(item.item) == "1-UP")
+    num_1_ups = ctx.get_item_counts()[523140]
     current_lives = dme.read_word(dme.read_word(addresses.SMS_FLAGS_PTR) + addresses.LIVES_COUNT_OFFSET)
 
     # Only increase lives a single time when a 1-UP is received
@@ -725,8 +759,9 @@ async def resolve_tickets(stage, ctx):
             dme.write_byte(addresses.SMS_NEXT_STAGE, 1)
             dme.write_byte(addresses.SMS_CURRENT_STAGE, 1)
             await send_map_id(1, ctx)
-        else:
-            await send_map_id(stage, ctx)
+            return
+    # Send the map id once, not once per non-matching ticket.
+    await send_map_id(stage, ctx)
     return
 
 # Checks to see if player changed stages to update map_id for Poptracker
