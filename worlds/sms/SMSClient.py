@@ -79,8 +79,10 @@ class SmsCommandProcessor(ClientCommandProcessor):
     def _cmd_resync(self):
         """Manually trigger a resync."""
         self.output("Syncing items.")
-        self.ctx.syncing = True
-        refresh_collection_counts(self.ctx)
+        self.ctx.locations_sent = set()
+        Utils.async_start(self.ctx.send_msgs([{"cmd": "Sync"}]))
+        if dolphin_ready(self.ctx):
+            refresh_collection_counts(self.ctx)
 
     def _cmd_change_dolphin_process_name(self, process_name: str):
         """Specify the name of the Dolphin process to connect to. "" for system default."""
@@ -127,7 +129,6 @@ class SmsContext(SuperContext):
     def __init__(self, server_address, password):
         super(SmsContext, self).__init__(server_address, password)
         self.send_index: int = 0
-        self.syncing = False
         self.awaiting_bridge = False
         self.dolphin_sync_task: Optional[asyncio.Task[None]] = None
         self.dolphin_status: str = CONNECTION_INITIAL_STATUS
@@ -138,6 +139,7 @@ class SmsContext(SuperContext):
         self.ap_nozzles_received: list[int] = []
         # Location ids already sent to the server this connection; only the difference is sent.
         self.locations_sent: set[int] = set()
+        self.last_pending_resend: float = 0.0
         # Last map/episode ids stored on the server, so each is only sent when it changes.
         self.last_map_id: Optional[int] = None
         self.last_episode_id: Optional[int] = None
@@ -166,17 +168,18 @@ class SmsContext(SuperContext):
             return []
 
     def on_package(self, cmd: str, args: dict):
-        if cmd == "Connected":
-            # Universal Tracker starts a new watcher_task on every Connected without cancelling
-            # the previous one, so each reconnect adds another full logic rebuild per item update.
-            old_watcher: Optional[asyncio.Task] = getattr(self, "watcher_task", None)
-            if old_watcher is not None and not old_watcher.done():
-                old_watcher.cancel()
+        old_watcher: Optional[asyncio.Task] = getattr(self, "watcher_task", None)
 
         super().on_package(cmd, args)
 
-        if cmd == "ReceivedItems":
-            # items_received was just rebuilt or appended to.
+        # Universal Tracker starts a new watcher_task on every Connected without cancelling the
+        # previous one, so each reconnect added another full logic rebuild per item update.
+        if (cmd == "Connected" and old_watcher is not None and not old_watcher.done()
+                and getattr(self, "watcher_task", None) is not old_watcher):
+            old_watcher.cancel()
+
+        if cmd in ("ReceivedItems", "Connected"):
+            # items_received was just rebuilt or appended to, or belongs to a new slot.
             self._item_counts = None
 
         if cmd == "Connected":
@@ -211,8 +214,7 @@ class SmsContext(SuperContext):
         logger.info(f"DeathLink received! Source: {source}")
         logger.info(f"DeathLink message: {cause}")
         logger.info("Killing Mario now...")
-        self.has_receive_death = True
-        kill_mario(self)
+        self.has_receive_death = kill_mario(self)
 
     def get_item_counts(self) -> collections.Counter[int]:
         """Received-item counts by item id, cached until the next ReceivedItems packet."""
@@ -266,6 +268,7 @@ storedNozzleBoxes = []
 curNozzleBoxes = []
 
 DELAY_SECONDS = .5
+PENDING_RESEND_SECONDS = 10
 # Built once; get_location_name_to_id() rebuilds the whole table on every call.
 LOCATION_NAME_TO_ID: dict[str, int] = get_location_name_to_id()
 
@@ -290,10 +293,24 @@ def in_file_select():
     return dme.read_byte(addresses.SMS_CURRENT_STAGE) == 15
 
 
+def dolphin_ready(ctx: SmsContext) -> bool:
+    """Whether Dolphin is hooked into the SMS AP game and the client is in a slot."""
+    return ctx.slot is not None and ctx.dolphin_status == CONNECTION_CONNECTED_STATUS and dme.is_hooked()
+
+
+def dolphin_read_failed(ctx: SmsContext, message: str) -> None:
+    """Drop the hook after a failed memory read so dolphin_sync_task re-hooks, logging once."""
+    if ctx.dolphin_status == CONNECTION_CONNECTED_STATUS:
+        logger.error(message)
+        logger.info("Connection to Dolphin lost, reconnecting...")
+    ctx.dolphin_status = CONNECTION_LOST_STATUS
+    dme.un_hook()
+
+
 async def game_watcher(ctx: SmsContext):
     while not ctx.exit_event.is_set():
-        if not dme.is_hooked() or ctx.slot is None:
-            await asyncio.sleep(5)
+        if not dolphin_ready(ctx):
+            await asyncio.sleep(1)
             continue
 
         # if in_file_select():
@@ -305,8 +322,7 @@ async def game_watcher(ctx: SmsContext):
         try:
             await game_watcher_tick(ctx)
         except Exception as e:
-            logger.error(f"SMS game watcher error, retrying: {e}")
-            await asyncio.sleep(1)
+            dolphin_read_failed(ctx, f"SMS game watcher error: {e}")
 
         await asyncio.sleep(0.2)
         ctx.lives_switch = False
@@ -323,14 +339,18 @@ async def game_watcher_tick(ctx: SmsContext):
     # ReceivedItems list back five times a second. Each packet re-runs Universal Tracker's
     # update, which leaks memory in its GUI, so long sessions grew to many GB (issue #66).
     # Sync only on /resync, and only send checks that are new.
-    if ctx.syncing:
-        ctx.syncing = False
-        ctx.locations_sent = set()
-        await ctx.send_msgs([{"cmd": "Sync"}])
     new_locations = ctx.locations_checked - ctx.locations_sent
     if new_locations:
         ctx.locations_sent |= new_locations
+        ctx.last_pending_resend = time.monotonic()
         await ctx.send_msgs([{"cmd": "LocationChecks", "locations": list(new_locations)}])
+    elif time.monotonic() - ctx.last_pending_resend > PENDING_RESEND_SECONDS:
+        # Re-send checks the server still hasn't confirmed, in case a send was dropped. This
+        # doesn't trigger a ReceivedItems reply, so it can't bring the old packet storm back.
+        ctx.last_pending_resend = time.monotonic()
+        pending = ctx.locations_checked - ctx.checked_locations
+        if pending:
+            await ctx.send_msgs([{"cmd": "LocationChecks", "locations": list(pending)}])
 
     #Gravi01 Begin
     refresh_collection_counts(ctx)
@@ -423,7 +443,10 @@ async def handle_stages(ctx):
             # Should change this to be flag based, set the flags necessary to load plaza 8 regardless
             dme.write_byte(addresses.SMS_NEXT_EPISODE, 8)
     
-    if cur_stage != next_stage:
+    if cur_stage == next_stage:
+        # No-op unless the stored value is stale (e.g. right after a reconnect).
+        await send_map_id(cur_stage, ctx)
+    else:
         await send_map_id(next_stage, ctx)
 
         if ctx.ticket_mode:
@@ -443,6 +466,9 @@ async def dolphin_sync_task(ctx: SmsContext) -> None:
     while not ctx.exit_event.is_set():
         try:
             if dme.is_hooked() and ctx.dolphin_status == CONNECTION_CONNECTED_STATUS:
+                if dme.read_bytes(0x80000000, 6) != b"GMSEAP":
+                    set_dolphin_status(ctx, CONNECTION_REFUSED_GAME_STATUS)
+                    continue
                 # if ctx.slot is not None:
                 #     # await give_items(ctx)
                 #     # await check_locations(ctx)
@@ -459,9 +485,8 @@ async def dolphin_sync_task(ctx: SmsContext) -> None:
                     ctx.curr_blue_coins = counts[523014]
                     ticket_list: list[str] = []
                     if ctx.ticket_mode:
-                        ticket_list = [ctx.item_names.lookup_in_game(item_id).replace(" Ticket", "")
-                                       for item_id in sorted(counts)
-                                       if ctx.item_names.lookup_in_game(item_id) in TICKET_ITEMS]
+                        ticket_list = [name.replace(" Ticket", "")
+                                       for name, item_id in TICKET_ITEMS.items() if counts[item_id]]
                     # Only touch the labels when something changed, not ten times a second.
                     ui_state = (ctx.curr_shines, ctx.req_shine, ctx.curr_blue_coins, ctx.req_blue_coins,
                                 tuple(ticket_list))
@@ -482,9 +507,9 @@ async def dolphin_sync_task(ctx: SmsContext) -> None:
                 if ctx.dolphin_status == CONNECTION_CONNECTED_STATUS:
                     logger.info("Connection to Dolphin lost, reconnecting...")
                     ctx.dolphin_status = CONNECTION_LOST_STATUS
-                # Stay hooked while Dolphin runs another game or no game: each hook() opens a new
-                # process handle that un_hook() never closes (Windows), so re-hooking every 5s
-                # leaked a handle per attempt.
+                # Stay hooked while Dolphin runs another game: each hook() opens a new process
+                # handle that un_hook() never closes (Windows), so re-hooking every 5s leaked a
+                # handle per attempt.
                 if not dme.is_hooked():
                     dme.hook()
                 if dme.is_hooked():
@@ -493,9 +518,8 @@ async def dolphin_sync_task(ctx: SmsContext) -> None:
                         await asyncio.sleep(5)
                     else:
                         set_dolphin_status(ctx, CONNECTION_CONNECTED_STATUS)
-                        ctx.locations_checked = set()
-                        # Clear the byte caches too, or flags already set in the save are never
-                        # detected again after a re-hook.
+                        # Re-scan every flag after a re-hook. locations_checked is kept, so a
+                        # check whose send was lost is still re-sent.
                         for cache in (storedShines, storedBlues, storedNozzleBoxes):
                             cache[:] = [0x00] * len(cache)
                         await asyncio.sleep(5)
@@ -504,7 +528,7 @@ async def dolphin_sync_task(ctx: SmsContext) -> None:
                     await asyncio.sleep(5)
                     continue
         except Exception:
-            if ctx.dolphin_status != CONNECTION_LOST_STATUS:
+            if ctx.dolphin_status == CONNECTION_CONNECTED_STATUS:
                 logger.info("Connection to Dolphin failed, attempting again in 5 seconds...")
                 logger.error(traceback.format_exc())
             ctx.dolphin_status = CONNECTION_LOST_STATUS
@@ -527,8 +551,8 @@ async def unhook_dolphin(ctx: SmsContext):
 
 async def arbitrary_ram_checks(ctx):
     while not ctx.exit_event.is_set():
-        if not dme.is_hooked() or ctx.slot is None:
-            await asyncio.sleep(5)
+        if not dolphin_ready(ctx):
+            await asyncio.sleep(1)
             continue
 
         try:
@@ -540,7 +564,7 @@ async def arbitrary_ram_checks(ctx):
                     dme.write_byte(addresses.ARB_FLUDD_ENABLER, 0x1)
                     dme.write_byte(addresses.ARB_NOZZLES_ENABLER, activated_bits)
         except Exception as e:
-            logger.error(f"SMS nozzle watcher error, retrying: {e}")
+            dolphin_read_failed(ctx, f"SMS nozzle watcher error: {e}")
         await asyncio.sleep(DELAY_SECONDS)
 
 
@@ -782,9 +806,10 @@ def kill_mario(ctx: SmsContext):
             actual_target = pointer_value + 0x4C
 
             dme.write_bytes(actual_target, (0x4020).to_bytes(2, byteorder="big"))
+            return True
         except Exception as e:
             logger.error(f"Failed to kill Mario - connection may be lost: {e}")
-    return
+    return False
 
 
 async def resolve_tickets(stage, ctx):
