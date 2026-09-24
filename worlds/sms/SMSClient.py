@@ -257,15 +257,20 @@ class SmsContext(SuperContext):
         logger.info(f"DeathLink received! Source: {source}")
         logger.info(f"DeathLink message: {cause}")
         logger.info("Killing Mario now...")
-        self.has_receive_death = True
-        self.kill_mario()
+        # Only expect the incoming death if Mario was actually killed; otherwise the flag stays set
+        # and the player's next real death is treated as this one and never sent.
+        self.has_receive_death = self.kill_mario()
 
-    def kill_mario(self):
-        """Uses the same logic as Gecko code death trigger"""
+    def kill_mario(self) -> bool:
+        """Uses the same logic as Gecko code death trigger. Returns whether the kill was written."""
         if self.slot is not None and dme.is_hooked() and self.dolphin_status == CONNECTION_CONNECTED_STATUS:
-            dme.write_bytes(dme.follow_pointers(0x8040E178, [0x4C]),
-                (0x4020).to_bytes(2, byteorder="big"))
-        return
+            try:
+                dme.write_bytes(dme.follow_pointers(0x8040E178, [0x4C]),
+                    (0x4020).to_bytes(2, byteorder="big"))
+                return True
+            except RuntimeError as dmeEx:
+                logger.error("Could not kill Mario. Details: " + str(dmeEx))
+        return False
 
     def make_gui(self):
         # Performing local import to prevent additional UIs to appear during the patching process.
