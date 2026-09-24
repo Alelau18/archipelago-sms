@@ -142,8 +142,7 @@ class SmsContext(SuperContext):
         self.last_map_id: Optional[int] = None
         self.last_episode_id: Optional[int] = None
         # Received-item counts, recomputed only when items_received changes (see get_item_counts).
-        self._item_counts: collections.Counter[int] = collections.Counter()
-        self._item_counts_key: tuple[int, int] = (0, -1)
+        self._item_counts: Optional[collections.Counter[int]] = None
         self._ui_state: tuple = ()
 
         from . import SuperMarioSunshineSettings
@@ -175,6 +174,10 @@ class SmsContext(SuperContext):
                 old_watcher.cancel()
 
         super().on_package(cmd, args)
+
+        if cmd == "ReceivedItems":
+            # items_received was just rebuilt or appended to.
+            self._item_counts = None
 
         if cmd == "Connected":
             self.last_map_id = None
@@ -212,11 +215,9 @@ class SmsContext(SuperContext):
         kill_mario(self)
 
     def get_item_counts(self) -> collections.Counter[int]:
-        """Received-item counts by item id, cached until items_received changes."""
-        key = (id(self.items_received), len(self.items_received))
-        if key != self._item_counts_key:
+        """Received-item counts by item id, cached until the next ReceivedItems packet."""
+        if self._item_counts is None:
             self._item_counts = collections.Counter(item.item for item in self.items_received)
-            self._item_counts_key = key
         return self._item_counts
 
     def get_corona_goal(self):
@@ -319,8 +320,9 @@ async def game_watcher_tick(ctx: SmsContext):
         await check_death(ctx)
 
     # Sending Sync + every checked location each tick made the server stream the whole
-    # ReceivedItems list back five times a second, which grew memory without bound over
-    # long sessions (issue #66). Sync only on /resync, and only send checks that are new.
+    # ReceivedItems list back five times a second. Each packet re-runs Universal Tracker's
+    # update, which leaks memory in its GUI, so long sessions grew to many GB (issue #66).
+    # Sync only on /resync, and only send checks that are new.
     if ctx.syncing:
         ctx.syncing = False
         ctx.locations_sent = set()
