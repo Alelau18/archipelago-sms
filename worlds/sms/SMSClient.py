@@ -196,12 +196,18 @@ class SmsContext(SuperContext):
             #     await ctx.send_msgs([{"cmd": "StatusUpdate", "status": ClientStatus.CLIENT_GOAL}])
             #     ctx.finished_game = True
 
-        except Exception as dmeEx:
-            logger.error("Unable to connect to Super Mario Sunshine. Details: " + str(dmeEx))
+        except RuntimeError as dmeEx:
+            # dolphin_memory_engine raises RuntimeError when Dolphin or the game can't be read.
             # Only drop the Dolphin hook; the next loop re-hooks. Disconnecting from the AP
             # server here counts as intentional, so the client never reconnected on its own.
+            logger.error("Unable to connect to Super Mario Sunshine. Details: " + str(dmeEx))
             dme.un_hook()
             self.set_dolphin_status(CONNECTION_LOST_STATUS)
+            await wait_for_next_loop(WAIT_TIMER_LONG_TIMEOUT)
+
+        except Exception as dmeEx:
+            logger.error("Unable to connect to Super Mario Sunshine. Details: " + str(dmeEx))
+            await self.disconnect()
             await wait_for_next_loop(WAIT_TIMER_LONG_TIMEOUT)
 
     async def try_hook(self) -> bool:
