@@ -71,7 +71,8 @@ NOZZLES: list[NozzleItem] = [
 ]
 
 class SmsCommandProcessor(ClientCommandProcessor):
-    def _cmd_connect(self, address: str = "") -> bool:
+    def _cmd_dolphin(self):
+        """Prints the current Dolphin connection status."""
         if isinstance(self.ctx, SmsContext):
             logger.info(f"Dolphin Status: {self.ctx.dolphin_status}")
 
@@ -83,7 +84,6 @@ class SmsCommandProcessor(ClientCommandProcessor):
 
     def _cmd_change_dolphin_process_name(self, process_name: str):
         """Specify the name of the Dolphin process to connect to. "" for system default."""
-        self.ctx.hook_check = False
         self.ctx.hook_name = process_name
         logger.info(f"Changing Dolphin process name to: {process_name if process_name else ""}")
         from . import SuperMarioSunshineSettings
@@ -103,7 +103,6 @@ class SmsContext(SuperContext):
 
     options: SmsOptions
     hook_name: str = ""
-    hook_check = True
 
     lives_given = 0
     lives_switch = False
@@ -139,6 +138,9 @@ class SmsContext(SuperContext):
         self.ap_nozzles_received: list[int] = []
         # Location ids already sent to the server this connection; only the difference is sent.
         self.locations_sent: set[int] = set()
+        # Last map/episode ids stored on the server, so each is only sent when it changes.
+        self.last_map_id: Optional[int] = None
+        self.last_episode_id: Optional[int] = None
         # Received-item counts, recomputed only when items_received changes (see get_item_counts).
         self._item_counts: collections.Counter[int] = collections.Counter()
         self._item_counts_key: tuple[int, int] = (0, -1)
@@ -165,9 +167,18 @@ class SmsContext(SuperContext):
             return []
 
     def on_package(self, cmd: str, args: dict):
+        if cmd == "Connected":
+            # Universal Tracker starts a new watcher_task on every Connected without cancelling
+            # the previous one, so each reconnect adds another full logic rebuild per item update.
+            old_watcher: Optional[asyncio.Task] = getattr(self, "watcher_task", None)
+            if old_watcher is not None and not old_watcher.done():
+                old_watcher.cancel()
+
         super().on_package(cmd, args)
 
         if cmd == "Connected":
+            self.last_map_id = None
+            self.last_episode_id = None
             # Resend every known check once after a (re)connect; the server already sends the
             # full ReceivedItems list on Connected, so no Sync is needed here.
             self.locations_sent = set()
@@ -288,35 +299,45 @@ async def game_watcher(ctx: SmsContext):
         #     await asyncio.sleep(1)
         #     continue
 
-        await handle_stages(ctx)
-        await location_watcher(ctx)
-
-        if "DeathLink" in ctx.tags:
-            await check_death(ctx)
-
-        # Sending Sync + every checked location each tick made the server stream the whole
-        # ReceivedItems list back five times a second, which grew memory without bound over
-        # long sessions (issue #66). Sync only on /resync, and only send checks that are new.
-        if ctx.syncing:
-            ctx.syncing = False
-            ctx.locations_sent = set()
-            await ctx.send_msgs([{"cmd": "Sync"}])
-        new_locations = ctx.locations_checked - ctx.locations_sent
-        if new_locations:
-            ctx.locations_sent |= new_locations
-            await ctx.send_msgs([{"cmd": "LocationChecks", "locations": list(new_locations)}])
-
-        #Gravi01 Begin
-        refresh_collection_counts(ctx)
-        ctx.lives_switch = True
-        #Gravi01 End
-
-        if ctx.victory and not ctx.finished_game:
-            await ctx.send_msgs([{"cmd": "StatusUpdate", "status": ClientStatus.CLIENT_GOAL}])
-            ctx.finished_game = True
+        # A failed Dolphin read must not end this task for the rest of the session: the client
+        # would stay connected but silently stop sending checks and writing items.
+        try:
+            await game_watcher_tick(ctx)
+        except Exception as e:
+            logger.error(f"SMS game watcher error, retrying: {e}")
+            await asyncio.sleep(1)
 
         await asyncio.sleep(0.2)
         ctx.lives_switch = False
+
+
+async def game_watcher_tick(ctx: SmsContext):
+    await handle_stages(ctx)
+    await location_watcher(ctx)
+
+    if "DeathLink" in ctx.tags:
+        await check_death(ctx)
+
+    # Sending Sync + every checked location each tick made the server stream the whole
+    # ReceivedItems list back five times a second, which grew memory without bound over
+    # long sessions (issue #66). Sync only on /resync, and only send checks that are new.
+    if ctx.syncing:
+        ctx.syncing = False
+        ctx.locations_sent = set()
+        await ctx.send_msgs([{"cmd": "Sync"}])
+    new_locations = ctx.locations_checked - ctx.locations_sent
+    if new_locations:
+        ctx.locations_sent |= new_locations
+        await ctx.send_msgs([{"cmd": "LocationChecks", "locations": list(new_locations)}])
+
+    #Gravi01 Begin
+    refresh_collection_counts(ctx)
+    ctx.lives_switch = True
+    #Gravi01 End
+
+    if ctx.victory and not ctx.finished_game:
+        await ctx.send_msgs([{"cmd": "StatusUpdate", "status": ClientStatus.CLIENT_GOAL}])
+        ctx.finished_game = True
 
 
 async def check_death(ctx: SmsContext):
@@ -349,8 +370,9 @@ async def check_death(ctx: SmsContext):
 
 
 async def location_watcher(ctx):
+    flags_ptr = dme.read_word(addresses.SMS_FLAGS_PTR)
     for x in range(0, addresses.SMS_SHINE_BYTE_COUNT):
-        targ_location = dme.read_word(addresses.SMS_FLAGS_PTR) + x
+        targ_location = flags_ptr + x
         cache_byte = dme.read_byte(targ_location)
         curShines[x] = cache_byte
         if storedShines[x] != curShines[x]:
@@ -359,7 +381,7 @@ async def location_watcher(ctx):
 
     # If possible, check if blue coin sanity is enabled or not
     for x in range(0, addresses.SMS_BLUECOIN_BYTE_COUNT):
-        targ_location = dme.read_word(addresses.SMS_FLAGS_PTR) + addresses.BLUECOIN_LOC_OFFSET + x
+        targ_location = flags_ptr + addresses.BLUECOIN_LOC_OFFSET + x
         cache_byte = dme.read_byte(targ_location)
         curBlues[x] = cache_byte
         if storedBlues[x] != curBlues[x]:
@@ -367,7 +389,7 @@ async def location_watcher(ctx):
             storedBlues[x] = curBlues[x]
 
     for x in range(0, addresses.NOZZLE_BOXES_BYTE_COUNT):
-        targ_location = dme.read_word(addresses.SMS_FLAGS_PTR) + addresses.NOZZLE_BOXES_OFFSET + x
+        targ_location = flags_ptr + addresses.NOZZLE_BOXES_OFFSET + x
         cache_byte = dme.read_byte(targ_location)
         curNozzleBoxes[x] = cache_byte
         if storedNozzleBoxes[x] != curNozzleBoxes[x]:
@@ -375,7 +397,7 @@ async def location_watcher(ctx):
             storedNozzleBoxes[x] = curNozzleBoxes[x]
 
     # Check corresponds to Shadow Mario Yoshi Egg Chase
-    delfino_yoshi_unlock = dme.read_byte(dme.read_word(addresses.SMS_FLAGS_PTR) + addresses.DELFINO_YOSHI_OFFSET)
+    delfino_yoshi_unlock = dme.read_byte(flags_ptr + addresses.DELFINO_YOSHI_OFFSET)
     if (delfino_yoshi_unlock & 0x80) and not ctx.checked_yoshi_egg:
         ctx.checked_yoshi_egg = True
         memory_changed(ctx, 113, delfino_yoshi_unlock, "Yoshi")
@@ -458,39 +480,48 @@ async def dolphin_sync_task(ctx: SmsContext) -> None:
                 if ctx.dolphin_status == CONNECTION_CONNECTED_STATUS:
                     logger.info("Connection to Dolphin lost, reconnecting...")
                     ctx.dolphin_status = CONNECTION_LOST_STATUS
-                logger.info("Attempting to connect to Dolphin...")
-                dme.hook()
+                # Stay hooked while Dolphin runs another game or no game: each hook() opens a new
+                # process handle that un_hook() never closes (Windows), so re-hooking every 5s
+                # leaked a handle per attempt.
+                if not dme.is_hooked():
+                    dme.hook()
                 if dme.is_hooked():
                     if dme.read_bytes(0x80000000, 6) != b"GMSEAP":
-                        logger.info(CONNECTION_REFUSED_GAME_STATUS)
-                        ctx.dolphin_status = CONNECTION_REFUSED_GAME_STATUS
-                        await unhook_dolphin(ctx)
+                        set_dolphin_status(ctx, CONNECTION_REFUSED_GAME_STATUS)
                         await asyncio.sleep(5)
                     else:
-                        logger.info(CONNECTION_CONNECTED_STATUS)
-                        ctx.dolphin_status = CONNECTION_CONNECTED_STATUS
+                        set_dolphin_status(ctx, CONNECTION_CONNECTED_STATUS)
                         ctx.locations_checked = set()
+                        # Clear the byte caches too, or flags already set in the save are never
+                        # detected again after a re-hook.
+                        for cache in (storedShines, storedBlues, storedNozzleBoxes):
+                            cache[:] = [0x00] * len(cache)
                         await asyncio.sleep(5)
                 else:
-                    logger.info("Connection to Dolphin failed, attempting again in 5 seconds...")
-                    ctx.dolphin_status = CONNECTION_LOST_STATUS
-                    await unhook_dolphin(ctx)
+                    set_dolphin_status(ctx, CONNECTION_LOST_STATUS)
                     await asyncio.sleep(5)
                     continue
         except Exception:
-            logger.info("Connection to Dolphin failed, attempting again in 5 seconds...")
-            logger.error(traceback.format_exc())
+            if ctx.dolphin_status != CONNECTION_LOST_STATUS:
+                logger.info("Connection to Dolphin failed, attempting again in 5 seconds...")
+                logger.error(traceback.format_exc())
             ctx.dolphin_status = CONNECTION_LOST_STATUS
             await unhook_dolphin(ctx)
             await asyncio.sleep(5)
             continue
 
+
+def set_dolphin_status(ctx: SmsContext, status: str) -> None:
+    """Log the Dolphin status only when it changes, not on every 5s retry."""
+    if ctx.dolphin_status != status:
+        logger.info(status)
+    ctx.dolphin_status = status
+
+
 async def unhook_dolphin(ctx: SmsContext):
+    # Only drop the Dolphin hook. Disconnecting from the AP server here marked the disconnect as
+    # intentional, so the client never reconnected and every Dolphin hiccup cost the session.
     dme.un_hook()
-    if ctx.hook_check:
-        await ctx.disconnect()
-    else:
-        ctx.hook_check = True
 
 async def arbitrary_ram_checks(ctx):
     while not ctx.exit_event.is_set():
@@ -498,13 +529,16 @@ async def arbitrary_ram_checks(ctx):
             await asyncio.sleep(5)
             continue
 
-        activated_bits = dme.read_byte(addresses.ARB_NOZZLES_ENABLER)
+        try:
+            activated_bits = dme.read_byte(addresses.ARB_NOZZLES_ENABLER)
 
-        for noz in ctx.ap_nozzles_received:
-            if noz < 4:
-                activated_bits = bit_flagger(activated_bits, noz, True)
-                dme.write_byte(addresses.ARB_FLUDD_ENABLER, 0x1)
-                dme.write_byte(addresses.ARB_NOZZLES_ENABLER, activated_bits)
+            for noz in ctx.ap_nozzles_received:
+                if noz < 4:
+                    activated_bits = bit_flagger(activated_bits, noz, True)
+                    dme.write_byte(addresses.ARB_FLUDD_ENABLER, 0x1)
+                    dme.write_byte(addresses.ARB_NOZZLES_ENABLER, activated_bits)
+        except Exception as e:
+            logger.error(f"SMS nozzle watcher error, retrying: {e}")
         await asyncio.sleep(DELAY_SECONDS)
 
 
@@ -766,6 +800,9 @@ async def resolve_tickets(stage, ctx):
 
 # Checks to see if player changed stages to update map_id for Poptracker
 async def send_map_id(map_id, ctx):
+    if map_id == ctx.last_map_id:
+        return
+    ctx.last_map_id = map_id
     await ctx.send_msgs([{
         "cmd": "Set",
         "key": f"sms_map_{ctx.team}_{ctx.slot}",
@@ -775,6 +812,9 @@ async def send_map_id(map_id, ctx):
     }])
 
 async def send_episode_id(episode_id, ctx):
+    if episode_id == ctx.last_episode_id:
+        return
+    ctx.last_episode_id = episode_id
     await ctx.send_msgs([{
         "cmd": "Set",
         "key": f"sms_episode_{ctx.team}_{ctx.slot}",
