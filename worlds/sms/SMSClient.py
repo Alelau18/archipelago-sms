@@ -258,8 +258,9 @@ class SmsContext(SuperContext):
         logger.info(f"DeathLink message: {cause}")
         logger.info("Killing Mario now...")
         # Only expect the incoming death if Mario was actually killed; otherwise the flag stays set
-        # and the player's next real death is treated as this one and never sent.
-        self.has_receive_death = self.kill_mario()
+        # and the player's next real death is treated as this one and never sent. Never clear a
+        # flag an earlier, still-delayed kill is waiting on, or that death is sent back out.
+        self.has_receive_death = self.kill_mario() or self.has_receive_death
 
     def kill_mario(self) -> bool:
         """Uses the same logic as Gecko code death trigger. Returns whether the kill was written."""
