@@ -163,8 +163,15 @@ class SmsContext(SuperContext):
                     await wait_for_next_loop(WAIT_TIMER_LONG_TIMEOUT)
                     return
 
-                if not self.auth:
-                    self.auth = dme.read_bytes(addresses.SLOT_NAME_OFF, SMS_PLAYER_NAME_BYTE_LENGTH).decode("utf-8")
+                rom_slot_name: str = dme.read_bytes(addresses.SLOT_NAME_OFF, SMS_PLAYER_NAME_BYTE_LENGTH).decode("utf-8")
+                if self.auth and rom_slot_name != self.auth:
+                    # A ROM for another slot was loaded while connected; its checks and items
+                    # belong to that slot, so log out and let the player connect again.
+                    logger.info("A ROM for a different slot was loaded. Connect to the server again to play it.")
+                    await self.disconnect()
+                    self.auth = rom_slot_name
+                    return
+                self.auth = rom_slot_name
 
                 # Inform the player we are ready and waiting for them to connect.
                 if not self.rom_loaded:
