@@ -198,7 +198,10 @@ class SmsContext(SuperContext):
 
         except Exception as dmeEx:
             logger.error("Unable to connect to Super Mario Sunshine. Details: " + str(dmeEx))
-            await self.disconnect()
+            # Only drop the Dolphin hook; the next loop re-hooks. Disconnecting from the AP
+            # server here counts as intentional, so the client never reconnected on its own.
+            dme.un_hook()
+            self.set_dolphin_status(CONNECTION_LOST_STATUS)
             await wait_for_next_loop(WAIT_TIMER_LONG_TIMEOUT)
 
     async def try_hook(self) -> bool:
