@@ -4,6 +4,9 @@
 and decided. Release `0.6.3-alelau18` ships with the logic of upstream `main` (plus the Pianta Village
 ticket fix, #67), unchanged.
 
+Decisions and in-game findings so far are in [Decisions and findings](#decisions-and-findings), right
+after "How to read this".
+
 - Branch: [`alelau18-version`](https://github.com/Alelau18/archipelago-sms/tree/alelau18-version) on
   Alelau18/archipelago-sms. Code links point to the exact commit the review was done on.
 - Region data on this branch is identical to Joshark/archipelago-sms `main` (20cc30b5), so every item
@@ -34,6 +37,75 @@ ticket fix, #67), unchanged.
   gate (`location=` the previous episode's shine), not as a move.
 - Known tricks aren't treated as bugs. When it's unclear whether a rule is a deliberate trick or a
   mistake, the item goes to "Needs a decision" (section 3).
+
+---
+
+## Decisions and findings
+
+### A3 + A17 + E5: Corona and the final fight. Decided, pending implementation (one question open)
+
+Input from a tester who knows the tricks:
+- **The lava boat needs Spray on every tier.** Sprayless with Hover alone is possible but kaizo-level.
+  Maybe `salty_tears` later; not for now.
+- **`normal` / `hard`:** Spray + Hover + Rocket.
+- **`advanced`:** hoverless is fine, so Spray + Rocket.
+- **Without Rocket:** Spray + Turbo also beats Bowser, using turbo storage to reach him. **Open: which tier,
+  `advanced` or `salty_tears`?**
+
+Implementation:
+- The Corona entrance needs Spray, plus Hover at `normal`/`hard`.
+- Victory needs Rocket, or Turbo at the tier chosen above.
+- Corona's item blocklist stays as it is (no Spray, Hover or Rocket placed inside Corona).
+
+### A4: Pachinko. What the 3-shine gate stands for (checked in game; decision pending)
+
+The route in normal play uses the plaza's fruit boats. In the game:
+- **The boats only sail from plaza scenario 6 onward.** In scenario 5 they sit docked, whatever the shine
+  counter says. Scenarios 0 and 1 come earlier and weren't tested.
+- **The shine counter itself doesn't move them.** With the counter forced to 2 in a late scenario they kept
+  sailing, and with 4 shines in scenario 5 they stayed docked.
+- They sail in scenarios 6, 8 and 2 (checked on real saves, and by setting the flags below in memory).
+
+The plaza scenario comes from the stage-unlock flags (decomp `decideNextScenario`). These are the same bits
+the client uses as tickets:
+
+| Flags set | Plaza scenario |
+|---|---|
+| Corona open (`0x103AE`) | 2 (post-game) |
+| all seven episode-7 Shadow Marios beaten | 9 |
+| Pinna open (`0x10389`, which ticket mode sets every tick) | 8 |
+| Ricco (`0x10386`) **and** Gelato (`0x10387`) open | 7 with 10+ shines, else 6 |
+| Bianco open (`0x10385`) | 5 |
+| `0x10384` | 1 |
+| none | 0 |
+
+So:
+- **Vanilla access:** logic opens Ricco at 3 shines and Gelato at 5, so the boats sail from **5 shines**,
+  not 3.
+- **Ticket mode:** the client forces scenario 8, so the boats always sail.
+- **Fluddless without tickets:** see E1 below.
+
+Proposal (pending):
+- `normal`: Hover + **5** shines, instead of 3.
+- `hard` / `advanced` (today Rocket or Hover, no gate) only make sense if the hole can be reached without the
+  boat. If that route is a spin jump into Hover, it should be **Hover only**; otherwise Hover + 5 shines.
+- `salty_tears` (today item-free with no gate) is a data accident either way. Use the `advanced` rule
+  unless an item-free route is confirmed.
+
+### E1: confirmed from the code (in-game check optional)
+
+- Without tickets, a fluddless start only gets Bianco opened by the client ([`SMSClient.py:505`](https://github.com/Alelau18/archipelago-sms/blob/eef9a3c4ab82f3b2dc2ce41c377e1d0e862275e8/worlds/sms/SMSClient.py#L505)).
+  That's plaza scenario 5, the same as a spray start.
+- The `skip_forward` rule variants that fluddless uses assume the late plaza (scenario 8) and have no shine
+  gates. So they really are too loose for fluddless without tickets.
+- **Proposal:** apply `skip_forward` only in ticket mode, or give fluddless the shine-gated rules.
+
+### N2: probably fine (check pending)
+
+- With a 0% goal, the client opens Corona right away ([`SMSClient.py:739`](https://github.com/Alelau18/archipelago-sms/blob/eef9a3c4ab82f3b2dc2ce41c377e1d0e862275e8/worlds/sms/SMSClient.py#L739)).
+- Corona's flag makes the plaza load **scenario 2**, the post-game plaza, not an early one.
+- What's left to confirm is that every level entrance exists in scenario 2. That's likely, since it's the
+  plaza you get after beating the game.
 
 ---
 
@@ -80,7 +152,7 @@ world's logic and then checking them against the real-game model.
   - **Proposed:** collect the event coins and run their requirements through the same interpreter as
     real locations.
 
-- [ ] **A3: Victory has no rule.** Pending: fix, and confirm the Rocket fact.
+- [ ] **A3: Victory has no rule.** **Decided**; tiers are in [Decisions and findings](#decisions-and-findings).
   - The final Bowser fight needs the Rocket Nozzle, to get above the tub and ground-pound it
     ([`regions.py:277`](https://github.com/Alelau18/archipelago-sms/blob/eef9a3c4ab82f3b2dc2ce41c377e1d0e862275e8/worlds/sms/regions.py#L277)).
   - Only matters with minimal accessibility: 117 of 985 minimal seeds were unbeatable, mostly
@@ -108,7 +180,7 @@ world's logic and then checking them against the real-game model.
 
 | ID | Location | Today | Proposed | Tiers | Evidence / source |
 |---|---|---|---|---|---|
-| A4 | Plaza, Pachinko Game ([`delfino_plaza.py:114`](https://github.com/Alelau18/archipelago-sms/blob/eef9a3c4ab82f3b2dc2ce41c377e1d0e862275e8/worlds/sms/sms_regions/delfino_plaza.py#L114)) | `normal` needs 3 shines. The `hard`/`advanced` override drops the gate, and `salty_tears` uses `manual_none=True, shines=3`, which throws it away. | Keep `shines=3` on every tier | hard, adv, tears | Data accident. Probe: `salty_tears`, no items, 0 shines → reachable. Audit + new. |
+| A4 (see [findings](#decisions-and-findings)) | Plaza, Pachinko Game ([`delfino_plaza.py:114`](https://github.com/Alelau18/archipelago-sms/blob/eef9a3c4ab82f3b2dc2ce41c377e1d0e862275e8/worlds/sms/sms_regions/delfino_plaza.py#L114)) | `normal` needs 3 shines. The `hard`/`advanced` override drops the gate, and `salty_tears` uses `manual_none=True, shines=3`, which throws it away. | Keep `shines=3` on every tier | hard, adv, tears | Data accident. Probe: `salty_tears`, no items, 0 shines → reachable. Audit + new. |
 | A5 | Plaza, Burning Pianta blue ([`delfino_plaza.py:172`](https://github.com/Alelau18/archipelago-sms/blob/eef9a3c4ab82f3b2dc2ce41c377e1d0e862275e8/worlds/sms/sms_regions/delfino_plaza.py#L172)) | No shine gate | + 5 shines | all | The burning Pianta event starts at 5 shines. Dev WIP (305cd155) + audit. Its fluddless/ticket variants are E1. |
 | A6 | Sand-shine blues. Pinna 1: Tree Sand Shine ([`pinna_park.py:27`](https://github.com/Alelau18/archipelago-sms/blob/eef9a3c4ab82f3b2dc2ce41c377e1d0e862275e8/worlds/sms/sms_regions/pinna_park.py#L27)), Cannon Sand Shine ([`pinna_park.py:33`](https://github.com/Alelau18/archipelago-sms/blob/eef9a3c4ab82f3b2dc2ce41c377e1d0e862275e8/worlds/sms/sms_regions/pinna_park.py#L33)). Gelato 1: Sand Cabana ([`gelato_beach.py:229`](https://github.com/Alelau18/archipelago-sms/blob/eef9a3c4ab82f3b2dc2ce41c377e1d0e862275e8/worlds/sms/sms_regions/gelato_beach.py#L229)), Surf Cabana ([`gelato_beach.py:247`](https://github.com/Alelau18/archipelago-sms/blob/eef9a3c4ab82f3b2dc2ce41c377e1d0e862275e8/worlds/sms/sms_regions/gelato_beach.py#L247)). Gelato 2: Big Sand Shine ([`gelato_beach.py:306`](https://github.com/Alelau18/archipelago-sms/blob/eef9a3c4ab82f3b2dc2ce41c377e1d0e862275e8/worlds/sms/sms_regions/gelato_beach.py#L306)) | Yoshi alone works (Pinna), or a Yoshi + ep6 route (Gelato) | Drop the Yoshi-only routes | all | Dune buds react to water, not Yoshi juice. Dev WIP d919bdeb for Pinna. Gelato by the same reasoning; Gelato's own Middle Sand Shine already has no Yoshi route. |
 | A7 | Pinna 1, Beach Butterfly A/B ([`pinna_park.py:332`](https://github.com/Alelau18/archipelago-sms/blob/eef9a3c4ab82f3b2dc2ce41c377e1d0e862275e8/worlds/sms/sms_regions/pinna_park.py#L332)) | Yoshi alone | Yoshi + (Spray or Hover), gated on Pinna 5's shine | all | Hatching the egg needs fruit from sprayed sand (dev WIP). Sheet: butterflies exist eps 5–8; wiki: all 8. The gate is the safe side. Alternative: the dev's version without the gate. |
@@ -121,7 +193,7 @@ world's logic and then checking them against the real-game model.
 | A14 | Sirena 3, Box Hole ([`sirena_beach.py:144`](https://github.com/Alelau18/archipelago-sms/blob/eef9a3c4ab82f3b2dc2ce41c377e1d0e862275e8/worlds/sms/sms_regions/sirena_beach.py#L144)) | `normal`/`hard`: Yoshi only | `normal`: Spray + Yoshi. `hard`: Yoshi + (Spray or Hover). `advanced`: free, as today | normal, hard | The ep3 egg wants a pineapple behind a route that needs spraying. The repo's own ep3 shine asks for S/H with Yoshi. Same class as issue #38. New. |
 | A15 | Pianta 8, Soak the Sun ([`pianta_village.py:432`](https://github.com/Alelau18/archipelago-sms/blob/eef9a3c4ab82f3b2dc2ce41c377e1d0e862275e8/worlds/sms/sms_regions/pianta_village.py#L432)) | No episode gate | Gate on "Pianta Village 8 - Fluff Festival Coin Hunt" | hard only | Wiki: done by replaying Fluff Festival, and the sun image isn't there before. Only `hard` is loose (Spray + Turbo passes it, but Fluff needs Rocket/Hover). **Check in game** whether a first ep8 play shows the image. New. |
 | A16 | Pinna and Noki entrances ([`pinna_park.py:3`](https://github.com/Alelau18/archipelago-sms/blob/eef9a3c4ab82f3b2dc2ce41c377e1d0e862275e8/worlds/sms/sms_regions/pinna_park.py#L3), [`noki_bay.py:3`](https://github.com/Alelau18/archipelago-sms/blob/eef9a3c4ab82f3b2dc2ce41c377e1d0e862275e8/worlds/sms/sms_regions/noki_bay.py#L3)) | Shines only | + Gelato 1's shine | vanilla access | Plaza unlock order. Dev commit eebef1e9; sheet notes say "post Gelato unlock". |
-| A17 | Corona Mountain traversal ([`corona_mountain.py:3`](https://github.com/Alelau18/archipelago-sms/blob/eef9a3c4ab82f3b2dc2ce41c377e1d0e862275e8/worlds/sms/sms_regions/corona_mountain.py#L3)) | No nozzle requirement | `normal`/`hard`: Spray + Hover. `advanced`: see E5. `salty_tears`: free | normal, hard | The lava boat section. The code's own Corona item-block comment says Corona needs both nozzles, yet a fluddless start can put the goal in logic with no FLUDD. Audit. |
+| A17 (**decided**, see [findings](#decisions-and-findings)) | Corona Mountain traversal ([`corona_mountain.py:3`](https://github.com/Alelau18/archipelago-sms/blob/eef9a3c4ab82f3b2dc2ce41c377e1d0e862275e8/worlds/sms/sms_regions/corona_mountain.py#L3)) | No nozzle requirement | `normal`/`hard`: Spray + Hover. `advanced`: see E5. `salty_tears`: free | normal, hard | The lava boat section. The code's own Corona item-block comment says Corona needs both nozzles, yet a fluddless start can put the goal in logic with no FLUDD. Audit. |
 | A18 | Ricco 8, Yoshi's Fruit Adventure ([`ricco_harbor.py:387`](https://github.com/Alelau18/archipelago-sms/blob/eef9a3c4ab82f3b2dc2ce41c377e1d0e862275e8/worlds/sms/sms_regions/ricco_harbor.py#L387)) | `advanced`: Yoshi, or Rocket alone | Yoshi, or Rocket + Spray | adv, tears | Sheet: "Rocket + spray (for rocket storage)". New. |
 
 ---
@@ -142,11 +214,11 @@ world's logic and then checking them against the real-game model.
 
 | ID | Question | Details | Lean |
 |---|---|---|---|
-| E1 | **Fluddless start without tickets: which plaza state does it really load?** | `skip_forward` rule variants apply to fluddless starts too ([`sms_rules.py:54`](https://github.com/Alelau18/archipelago-sms/blob/eef9a3c4ab82f3b2dc2ce41c377e1d0e862275e8/worlds/sms/sms_rules.py#L54)), but the client only forces the late plaza (episode 8) in ticket mode ([`SMSClient.py:510`](https://github.com/Alelau18/archipelago-sms/blob/eef9a3c4ab82f3b2dc2ce41c377e1d0e862275e8/worlds/sms/SMSClient.py#L510)). Those variants have no shine gates (Gold Bird 10, Lily Pad 5, Pachinko 3, Yellow Goo 5, Sirena 5) and assume a plaza Yoshi egg. Probe: fluddless, 0 shines → Gold Bird, Lily Pad, Pachinko and Police Yellow Goo in logic. Both audits found this independently. | **Check in game.** If the plaza is early, limit `skip_forward` to ticket mode, or give fluddless the shine gates. |
+| E1 (**confirmed from code**, see [findings](#decisions-and-findings)) | **Fluddless start without tickets: which plaza state does it really load?** | `skip_forward` rule variants apply to fluddless starts too ([`sms_rules.py:54`](https://github.com/Alelau18/archipelago-sms/blob/eef9a3c4ab82f3b2dc2ce41c377e1d0e862275e8/worlds/sms/sms_rules.py#L54)), but the client only forces the late plaza (episode 8) in ticket mode ([`SMSClient.py:510`](https://github.com/Alelau18/archipelago-sms/blob/eef9a3c4ab82f3b2dc2ce41c377e1d0e862275e8/worlds/sms/SMSClient.py#L510)). Those variants have no shine gates (Gold Bird 10, Lily Pad 5, Pachinko 3, Yellow Goo 5, Sirena 5) and assume a plaza Yoshi egg. Probe: fluddless, 0 shines → Gold Bird, Lily Pad, Pachinko and Police Yellow Goo in logic. Both audits found this independently. | **Check in game.** If the plaza is early, limit `skip_forward` to ticket mode, or give fluddless the shine gates. |
 | E2 | **Bianco 1 bits 172/188 swapped?** Towers House ([`bianco_hills.py:176`](https://github.com/Alelau18/archipelago-sms/blob/eef9a3c4ab82f3b2dc2ce41c377e1d0e862275e8/worlds/sms/sms_regions/bianco_hills.py#L176)), Towers House M ([`bianco_hills.py:109`](https://github.com/Alelau18/archipelago-sms/blob/eef9a3c4ab82f3b2dc2ce41c377e1d0e862275e8/worlds/sms/sms_regions/bianco_hills.py#L109)) | The sheet labels the two bits the other way round, and each side's rules match its own labels. If the sheet is right, the graffiti coin is free at `hard`+, and the tower coin is in logic with Spray alone at `normal`. | **Check in game:** in Bianco ep1, spray the M on the Pianta lady's house and see which check is sent. |
 | E3 | Plaza Jail Cell ([`delfino_plaza.py:203`](https://github.com/Alelau18/archipelago-sms/blob/eef9a3c4ab82f3b2dc2ce41c377e1d0e862275e8/worlds/sms/sms_regions/delfino_plaza.py#L203)) | Dev WIP frees it at `normal`. Sheet and `main` have Hover at `normal`. | Keep Hover |
 | E4 | Lily Pad Ride at `salty_tears` ([`delfino_plaza.py:84`](https://github.com/Alelau18/archipelago-sms/blob/eef9a3c4ab82f3b2dc2ce41c377e1d0e862275e8/worlds/sms/sms_regions/delfino_plaza.py#L84)) | Item-free today. The island pipe is under goop only Yoshi juice removes; the community tears method is a Spray banana clip. | Spray |
-| E5 | Corona at `advanced` (see A17) | Spray *or* Hover (hoverless with precise spin dives) | Yes |
+| E5 (**decided**: hoverless at `advanced`) | Corona at `advanced` (see A17) | Spray *or* Hover (hoverless with precise spin dives) | Yes |
 | E6 | Sirena entrance, Hover alone ([`sirena_beach.py:4`](https://github.com/Alelau18/archipelago-sms/blob/eef9a3c4ab82f3b2dc2ce41c377e1d0e862275e8/worlds/sms/sms_regions/sirena_beach.py#L4)) | `main` and dev WIP allow it at `advanced`. The audit wanted the pineapple clip at `salty_tears` only. | Keep it at `advanced` (dev's call) |
 | E7 | Ricco 8 Fish Basket ([`ricco_harbor.py:412`](https://github.com/Alelau18/archipelago-sms/blob/eef9a3c4ab82f3b2dc2ce41c377e1d0e862275e8/worlds/sms/sms_regions/ricco_harbor.py#L412)) | Dev WIP moves it to episode 6. The sheet (and `main`) say episode 8 only. Moving it would also renumber the IDs. | Keep ep8 |
 | E8 | Noki 1 Rocket blue ([`noki_bay.py:60`](https://github.com/Alelau18/archipelago-sms/blob/eef9a3c4ab82f3b2dc2ce41c377e1d0e862275e8/worlds/sms/sms_regions/noki_bay.py#L60)) | Dev WIP tiers: `advanced` + Spray+Turbo; `salty_tears` Rocket, Spray+Turbo or Hover. That drops Turbo alone at `salty_tears`. | Skip unless someone knows |
@@ -178,7 +250,7 @@ world's logic and then checking them against the real-game model.
     and **Corona Mountain is stage 52 (0x34)**.
   - So in ticket mode the "no ticket" boot-out never fires for Corona.
   - **Proposed:** 52. Also check whether Corona's entrance can be reached before the goal at all.
-- [ ] **N2: Ticket mode with a 0% goal.** Pending: check in game.
+- [ ] **N2: Ticket mode with a 0% goal.** Probably fine; see [findings](#decisions-and-findings).
   - Since `0.6.3-alelau18`, a goal of 0 opens Corona right away. Before, 0 was read as 50, so Corona
     never opened in those seeds.
   - That also stops the client forcing plaza episode 8 in ticket mode from the first tick
@@ -232,7 +304,7 @@ world's logic and then checking them against the real-game model.
 
   The world's own logic never produced an unbeatable seed. Every failure is logic disagreeing with the
   game.
-- **In the real game.** Dolphin, US ISO. So far used for the DeathLink work and for N1. E1, E2, A15 and
-  N2 still need the in-game checks listed above.
+- **In the real game.** Dolphin, US ISO. Used so far for the DeathLink work, N1 (Corona's stage ID) and A4
+  (plaza boats per scenario). E2 and A15 still need in-game checks, and N2 needs its last confirmation.
 - Ready-made patches exist for most items (the audit port, and the engine fixes for A1–A3). Ask
   Alelau18 for them.
