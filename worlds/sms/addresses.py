@@ -47,5 +47,8 @@ ARB_NOZZLES_ENABLER = 0x80417A01
 ARB_FLUDD_ENABLER = 0x80417A00
 ARB_VERSION_CHECKER = 0x80578AA4
 
-# Game state
-GAME_STATE = 0x80902AA4
+# Game state lives in the gameplay director (TMarDirector in the SMS decomp). The old fixed
+# GAME_STATE address 0x80902AA4 was its mState field at the director's usual heap address.
+MAR_DIRECTOR_PTR = 0x8040E178
+DIRECTOR_FLAGS_OFFSET = 0x4C  # u16 mFlags
+DIRECTOR_STATE_OFFSET = 0x64  # u8 mState

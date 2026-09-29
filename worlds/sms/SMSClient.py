@@ -67,7 +67,7 @@ NOZZLES: list[NozzleItem] = [
     NozzleItem("Hover Nozzle", 523001),
     NozzleItem("Rocket Nozzle", 523002),
     NozzleItem("Turbo Nozzle", 523003),
-    NozzleItem("Yoshi", 53013)
+    NozzleItem("Yoshi", 523013)
 ]
 
 class SmsCommandProcessor(ClientCommandProcessor):
@@ -134,7 +134,13 @@ class SmsContext(SuperContext):
         self.dolphin_status: str = CONNECTION_INITIAL_STATUS
         self.awaiting_rom: bool = False
         self.has_send_death: bool = False
-        self.has_receive_death: bool = False
+        # A received DeathLink that hasn't killed Mario yet. It stays set until Mario dies, so a
+        # death received in a menu, a pause or a load still lands once he's back in a stage.
+        self.pending_kill: bool = False
+        # Whether the pending kill was written to the game, so the death it causes isn't sent back.
+        self.kill_written: bool = False
+        # Times of the deaths we sent, to recognise them when the server bounces them back to us.
+        self.sent_death_times: collections.deque[float] = collections.deque(maxlen=16)
         self.num_1_ups_current: int = 0
         self.ap_nozzles_received: list[int] = []
         # Location ids already sent to the server this connection; only the difference is sent.
@@ -211,16 +217,17 @@ class SmsContext(SuperContext):
 
 
     def on_deathlink(self, data: dict):
+        if data.get("time") in self.sent_death_times:
+            # Our own death bounced back. The base class only filters the latest one it sent.
+            return
         super().on_deathlink(data)
         source = data.get('source', 'Unknown')
         cause = data.get('cause', 'No cause specified')
         logger.info(f"DeathLink received! Source: {source}")
         logger.info(f"DeathLink message: {cause}")
-        logger.info("Killing Mario now...")
-        # Only expect the incoming death if Mario was actually killed; otherwise the flag stays set
-        # and the player's next real death is treated as this one and never sent. Never clear a
-        # flag an earlier, still-delayed kill is waiting on, or that death is sent back out.
-        self.has_receive_death = kill_mario(self) or self.has_receive_death
+        logger.info("Killing Mario as soon as he's in a stage...")
+        # check_death applies it on the next watcher tick, or once Mario is playable again.
+        self.pending_kill = True
 
     def get_item_counts(self) -> collections.Counter[int]:
         """Received-item counts by item id, cached until the next ReceivedItems packet."""
@@ -275,6 +282,18 @@ DELAY_SECONDS = .5
 PENDING_RESEND_SECONDS = 10
 # Built once; get_location_name_to_id() rebuilds the whole table on every call.
 LOCATION_NAME_TO_ID: dict[str, int] = get_location_name_to_id()
+
+MEM1_START = 0x80000000
+MEM1_END = 0x81800000
+FILE_SELECT_STAGE = 15
+# TMarDirector mState values
+DIRECTOR_STATE_PLAYING = 4
+DIRECTOR_STATE_MISS = 7  # Mario died: the "Too Bad!" sequence
+# TMarDirector mFlags bits. In normal play only the idle bits (shine taken, first/last
+# simulation tick of the frame) are set; any other bit is an event waiting to be handled.
+DIRECTOR_FLAG_GAME_OVER_PENDING = 0x20
+DIRECTOR_IDLE_FLAGS = 0xE000
+
 
 def read_string(console_address: int, strlen: int) -> str:
     return dme.read_bytes(console_address, strlen).split(b"\0", 1)[0].decode()
@@ -367,32 +386,36 @@ async def game_watcher_tick(ctx: SmsContext):
 
 
 async def check_death(ctx: SmsContext):
-    """Check if Mario died by checking if in the 'Mario is dying' game mode, then send DeathLink."""
+    """Send a DeathLink when Mario dies, and kill Mario for a received one once he's playable."""
     if ctx.slot is None:
         return
 
-    try:
-        game_state = dme.read_byte(addresses.GAME_STATE)
+    director = read_director()
+    if director is None:
+        return
+    game_state = dme.read_byte(director + addresses.DIRECTOR_STATE_OFFSET)
 
-        # Check to see if Mario is dying
-        if game_state == 7:
+    if game_state == DIRECTOR_STATE_MISS:
+        # Only send a death that is ours, not the one a received DeathLink caused.
+        if not ctx.has_send_death and not ctx.kill_written:
+            if not server_connected(ctx):
+                # Stay unsent; the next tick retries while the death animation lasts.
+                return
+            player_name = ctx.player_names[ctx.slot] if ctx.slot in ctx.player_names else "Player"
+            await ctx.send_death(f"{player_name} died!")
+            ctx.sent_death_times.append(ctx.last_death_link)
+            logger.info(f"Sent DeathLink: Mario died")
 
-            # Only sends a death link if they are the person dying and have not been sent a death link
-            if not ctx.has_send_death and not ctx.has_receive_death:
-                player_name = ctx.player_names[ctx.slot] if ctx.slot in ctx.player_names else "Player"
-                await ctx.send_death(f"{player_name} died!")
-                logger.info(f"Sent DeathLink: Mario died")
+        ctx.has_send_death = True
+        # Whatever DeathLink was pending is satisfied by this death.
+        ctx.pending_kill = False
+        ctx.kill_written = False
 
-            # Set variables to combat niche cases where a death link is sent during an abnormal time
-            # i.e. game paused, cutscene, shine get, etc.
-            ctx.has_send_death = True
-            ctx.has_receive_death = False
-
+    elif game_state == DIRECTOR_STATE_PLAYING:
         # Allows for death links to be sent once respawned
-        elif game_state == 4:
-            ctx.has_send_death = False
-    except Exception as e:
-        logger.error(f"Error checking death: {e}")
+        ctx.has_send_death = False
+        if ctx.pending_kill and kill_mario(director):
+            ctx.kill_written = True
 
 
 async def location_watcher(ctx):
@@ -801,19 +824,37 @@ def increase_lives(ctx):
             dme.write_word(dme.read_word(addresses.SMS_FLAGS_PTR) + addresses.LIVES_COUNT_OFFSET, current_lives + 1)
     return
 
-def kill_mario(ctx: SmsContext):
-    """Uses the same logic as Gecko code death trigger"""
-    if ctx.slot is not None and dme.is_hooked() and ctx.dolphin_status == CONNECTION_CONNECTED_STATUS:
-        try:
-            pointer_addr = 0x8040E178
-            pointer_value = int.from_bytes(dme.read_bytes(pointer_addr, 4), byteorder="big")
-            actual_target = pointer_value + 0x4C
+def read_director() -> Optional[int]:
+    """Address of the gameplay director, or None while the game hasn't created one yet."""
+    director = dme.read_word(addresses.MAR_DIRECTOR_PTR)
+    return director if MEM1_START <= director < MEM1_END else None
 
-            dme.write_bytes(actual_target, (0x4020).to_bytes(2, byteorder="big"))
-            return True
-        except Exception as e:
-            logger.error(f"Failed to kill Mario - connection may be lost: {e}")
-    return False
+
+def server_connected(ctx: SmsContext) -> bool:
+    return ctx.server is not None and ctx.server.socket is not None and not ctx.server.socket.closed
+
+
+def kill_mario(director: int) -> bool:
+    """Kill Mario the way the game does for a normal death: set the director's game-over flag,
+    which the game acts on as soon as Mario is in normal play (after a talk or cutscene ends).
+    Only called while the director is in normal play. Returns whether the flag is set."""
+    # The title / file select screen also runs a director (stage 15), and during a stage change the
+    # pointer can still be the old stage's. Wait until the player is in a stage, so it lands there.
+    current_stage = dme.read_byte(addresses.SMS_CURRENT_STAGE)
+    if current_stage == FILE_SELECT_STAGE or current_stage != dme.read_byte(addresses.SMS_NEXT_STAGE):
+        return False
+
+    flags = int.from_bytes(dme.read_bytes(director + addresses.DIRECTOR_FLAGS_OFFSET, 2), byteorder="big")
+    if flags & DIRECTOR_FLAG_GAME_OVER_PENDING:
+        return True
+    if flags & ~DIRECTOR_IDLE_FLAGS:
+        # Another event is pending (shine get, stage change, ...). A death would take priority over
+        # it and e.g. lose the shine, so let it finish and try again on a later tick.
+        return False
+
+    # Only write the low byte, so the per-frame bits in the high byte are left alone.
+    dme.write_byte(director + addresses.DIRECTOR_FLAGS_OFFSET + 1, (flags | DIRECTOR_FLAG_GAME_OVER_PENDING) & 0xFF)
+    return True
 
 
 async def resolve_tickets(stage, ctx):
