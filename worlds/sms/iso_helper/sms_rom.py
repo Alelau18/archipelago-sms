@@ -173,7 +173,8 @@ class SMSPatch(APPatch, metaclass=AutoPatchRegister):
         from ..SMSClient import CLIENT_VERSION
         from sys import version_info
         lib_path = self.__get_archive_name()
-        lib_path_base = f"https://github.com/Joshark/archipelago-sms/releases/download/{CLIENT_VERSION}"
+        # Dependency zips are attached to the release matching CLIENT_VERSION.
+        lib_path_base = f"https://github.com/Alelau18/archipelago-sms/releases/download/{CLIENT_VERSION}"
         download_path = f"{lib_path_base}/{lib_path}{version_info.major}-{version_info.minor}.zip"
 
         temp_zip_path = os.path.join(tmp_dir_path, "temp.zip")
