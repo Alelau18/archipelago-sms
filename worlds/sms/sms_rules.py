@@ -40,10 +40,10 @@ def interpret_requirements(
                 reqs_copy.append(copy_req)
                 continue
 
-            temp_req = Requirements(copy_req.nozzles, copy_req.shines, copy_req.blue_coins, None,
-                copy_req.corona, copy_req.skip_forward, copy_req.manual_none)
+            # Keep whatever else the requirement needs, just without the location.
+            temp_req = copy_req._replace(location=None)
             if not temp_req.is_empty():
-                reqs_copy.append(copy_req)
+                reqs_copy.append(temp_req)
         requirement_set = reqs_copy
 
         # Secondary check after requirements were updated.

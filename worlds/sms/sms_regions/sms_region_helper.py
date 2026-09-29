@@ -118,7 +118,7 @@ class NozzleType(StrEnum):
 
 
 class Requirements(NamedTuple):
-    nozzles: Optional[list[list[str]]] = None  # conjunctive normal form
+    nozzles: Optional[list[list[str]]] = None  # any one of these sets, each set needing all its nozzles
     shines: Optional[int] = None  # number of shine sprites needed
     blue_coins: Optional[int] = None
     location: Optional[str] = None
@@ -325,11 +325,15 @@ SPROCKET_OR_HOVER_OR_TURBO_OR_YOSHI: list[list[str]] = [
 ]
 TURBO_OR_HOVER: list[list[str]] = [[NozzleType.hover], [NozzleType.turbo]]
 TURBO_OR_SPLASHER: list[list[str]] = [
-    [NozzleType.spray, NozzleType.hover, NozzleType.yoshi],
+    [NozzleType.spray],
+    [NozzleType.hover],
+    [NozzleType.yoshi],
     [NozzleType.turbo],
 ]
 ROCKET_OR_SPLASHER: list[list[str]] = [
-    [NozzleType.spray, NozzleType.hover, NozzleType.yoshi],
+    [NozzleType.spray],
+    [NozzleType.hover],
+    [NozzleType.yoshi],
     [NozzleType.rocket],
 ]
 YOSHI_AND_SPRAY_OR_YOSHI_AND_HOVER: list[list[str]] = [

@@ -30,8 +30,10 @@ SIRENA_BEACH_ONE: SmsRegion = SmsRegion(
                     location=f"{SmsRegionName.SIRENA_TWO} - The Hotel Lobby's Secret",
                 )
             ],
-            advanced=[Requirements(SPRAY_OR_HOVER)],
-            tears=[Requirements(SPRAY_OR_HOVER_OR_TURBO)],
+            advanced=[Requirements(SPRAY_OR_HOVER,
+                location=f"{SmsRegionName.SIRENA_TWO} - The Hotel Lobby's Secret")],
+            tears=[Requirements(SPRAY_OR_HOVER_OR_TURBO,
+                location=f"{SmsRegionName.SIRENA_TWO} - The Hotel Lobby's Secret")],
             hundred=True,
             in_game_bit=104,
         ),

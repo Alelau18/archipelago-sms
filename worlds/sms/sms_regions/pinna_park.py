@@ -400,8 +400,9 @@ PINNA_PARK_THREE: SmsRegion = SmsRegion(
                 )
             ],
             hard=[
+                # manual_none would discard the location gate along with the nozzles,
+                # so express "no nozzle needed" by only keeping the location.
                 Requirements(
-                    manual_none=True,
                     location=f"{SmsRegionName.PINNA_TWO} - The Beach Cannon's Secret",
                 )
             ],

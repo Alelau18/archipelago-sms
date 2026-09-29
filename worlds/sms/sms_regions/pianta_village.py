@@ -281,10 +281,14 @@ PIANTA_VILLAGE_FIVE: SmsRegion = SmsRegion(
             in_game_bit=64,
         ),
         Shine(
+            # The red coin revisit of the secret course only exists once the secret is done.
             "Red Coin Chucksters",
-            requirements=[Requirements(YOSHI_AND_HOVER)],
-            advanced=[Requirements([[NozzleType.hover]])],
-            tears=[Requirements(HOVER_OR_YOSHI)],
+            requirements=[Requirements(YOSHI_AND_HOVER,
+                location=f"{SmsRegionName.PIANTA_FIVE} - Secret of the Village Underside")],
+            advanced=[Requirements([[NozzleType.hover]],
+                location=f"{SmsRegionName.PIANTA_FIVE} - Secret of the Village Underside")],
+            tears=[Requirements(HOVER_OR_YOSHI,
+                location=f"{SmsRegionName.PIANTA_FIVE} - Secret of the Village Underside")],
             in_game_bit=68,
         ),
     ],
