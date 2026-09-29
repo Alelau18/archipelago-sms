@@ -189,18 +189,21 @@ class SmsContext(SuperContext):
             # full ReceivedItems list on Connected, so no Sync is needed here.
             self.locations_sent = set()
             slot_data = args.get("slot_data")
-            self.goal = slot_data.get("required_shines")
+            # Seeds generated before the Total Shines rework (0.6.2) only have corona_mountain_shines.
+            self.goal = slot_data.get("required_shines", slot_data.get("corona_mountain_shines"))
+            # These options' first value is 0, which is falsy - compare against None so
+            # option value 0 doesn't silently keep the class default.
             temp = slot_data.get("blue_coin_sanity")
-            if temp:
+            if temp is not None:
                 self.blue_status = temp
             temp = slot_data.get("starting_nozzle")
-            if temp:
+            if temp is not None:
                 self.fludd_start = temp
             temp = slot_data.get("level_access")
-            if temp:
+            if temp is not None:
                 self.ticket_mode = temp
 
-            self.req_shine = self.goal
+            self.req_shine = self.get_corona_goal()
             self.req_blue_coins = slot_data.get("blue_coin_maximum", 0)
 
             if "death_link" in slot_data:
@@ -226,10 +229,8 @@ class SmsContext(SuperContext):
         return self._item_counts
 
     def get_corona_goal(self):
-        if self.goal:
-            return self.goal
-        else:
-            return 50
+        # A goal of 0 is a legal option value - only fall back when it is missing.
+        return self.goal if self.goal is not None else 50
 
     def make_gui(self):
         # Performing local import to prevent additional UIs to appear during the patching process.
