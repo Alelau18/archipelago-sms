@@ -50,5 +50,6 @@ ARB_VERSION_CHECKER = 0x80578AA4
 # Game state lives in the gameplay director (TMarDirector in the SMS decomp). The old fixed
 # GAME_STATE address 0x80902AA4 was its mState field at the director's usual heap address.
 MAR_DIRECTOR_PTR = 0x8040E178
+MAR_DIRECTOR_VTABLE = 0x803DF0C8  # the director's first word; same on the title, file select, plaza and levels
 DIRECTOR_FLAGS_OFFSET = 0x4C  # u16 mFlags
 DIRECTOR_STATE_OFFSET = 0x64  # u8 mState

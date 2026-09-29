@@ -315,6 +315,7 @@ LOCATION_NAME_TO_ID: dict[str, int] = get_location_name_to_id()
 MEM1_START = 0x80000000
 MEM1_END = 0x81800000
 FILE_SELECT_STAGE = 15
+DIRECTOR_SIZE = 0x264
 # TMarDirector mState values
 DIRECTOR_STATE_PLAYING = 4
 DIRECTOR_STATE_MISS = 7  # Mario died: the "Too Bad!" sequence
@@ -449,6 +450,9 @@ async def check_death(ctx: SmsContext):
         ctx.kill_written = False
 
     elif game_state == DIRECTOR_STATE_PLAYING:
+        # Mario's own death animation also plays in this state before the game switches to the death
+        # state. A kill written then lands as that death, which counts as the received one and isn't
+        # sent: both deaths are covered by the one DeathLink, like a DeathLink arriving mid-death.
         # Allows for death links to be sent once respawned
         ctx.has_send_death = False
         if ctx.pending_kill and kill_mario(director):
@@ -862,9 +866,14 @@ def increase_lives(ctx):
     return
 
 def read_director() -> Optional[int]:
-    """Address of the gameplay director, or None while the game hasn't created one yet."""
+    """Address of the gameplay director, or None while there is none (boot, movies, stage loads)."""
     director = dme.read_word(addresses.MAR_DIRECTOR_PTR)
-    return director if MEM1_START <= director < MEM1_END else None
+    if not MEM1_START <= director < MEM1_END - DIRECTOR_SIZE:
+        return None
+    # The pointer can be left over from a director that was freed; only trust a live gameplay one.
+    if dme.read_word(director) != addresses.MAR_DIRECTOR_VTABLE:
+        return None
+    return director
 
 
 def server_connected(ctx: SmsContext) -> bool:
