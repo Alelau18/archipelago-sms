@@ -87,12 +87,12 @@ class SmsCommandProcessor(ClientCommandProcessor):
     def _cmd_change_dolphin_process_name(self, process_name: str):
         """Specify the name of the Dolphin process to connect to. "" for system default."""
         self.ctx.hook_name = process_name
-        logger.info(f"Changing Dolphin process name to: {process_name if process_name else ""}")
+        logger.info(f"Changing Dolphin process name to: {process_name if process_name else ''}")
         from . import SuperMarioSunshineSettings
         settings: SuperMarioSunshineSettings = get_settings().sms_options
         settings.dolphin_process_name = SuperMarioSunshineSettings.DolphinProcessName(process_name)
         get_settings().save()
-        log_msg: str = f"Dolphin process name set to {process_name or "default"}. You must open a new client for this to take effect."
+        log_msg: str = f"Dolphin process name set to {process_name or 'default'}. You must open a new client for this to take effect."
         logger.info(log_msg)
         Utils.messagebox("Close SMS Client to take effect", log_msg)
         Utils.async_start(unhook_dolphin(self.ctx))
