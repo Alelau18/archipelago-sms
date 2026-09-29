@@ -20,6 +20,7 @@ from .bit_helper import change_endian, bit_flagger, extract_bits
 from .regions import ALL_REGIONS, get_location_name_to_id
 from .items import TICKET_ITEMS
 import dolphin_memory_engine as dme
+import websockets
 from . import addresses
 from settings import get_settings
 
@@ -141,6 +142,10 @@ class SmsContext(SuperContext):
         self.kill_written: bool = False
         # Times of the deaths we sent, to recognise them when the server bounces them back to us.
         self.sent_death_times: collections.deque[float] = collections.deque(maxlen=16)
+        # Mario died while the death couldn't be sent (AP connection down); sent once it's back.
+        self.unsent_death: bool = False
+        # (seed, slot) the DeathLink state above belongs to.
+        self.death_link_owner: tuple = ()
         self.num_1_ups_current: int = 0
         self.ap_nozzles_received: list[int] = []
         # Location ids already sent to the server this connection; only the difference is sent.
@@ -215,6 +220,14 @@ class SmsContext(SuperContext):
             if "death_link" in slot_data:
                 Utils.async_start(self.update_death_link(bool(slot_data["death_link"])))
 
+            # DeathLink state carries over reconnects, but not into another seed or slot.
+            owner = (self.seed_name, self.slot)
+            if owner != self.death_link_owner:
+                self.death_link_owner = owner
+                self.pending_kill = False
+                self.kill_written = False
+                self.unsent_death = False
+
 
     def on_deathlink(self, data: dict):
         if data.get("time") in self.sent_death_times:
@@ -228,6 +241,22 @@ class SmsContext(SuperContext):
         logger.info("Killing Mario as soon as he's in a stage...")
         # check_death applies it on the next watcher tick, or once Mario is playable again.
         self.pending_kill = True
+
+    async def send_death(self, death_text: str = ""):
+        # Same as the base class, but the time is remembered before sending: another player's death
+        # handled while this one is sent moves last_death_link, and the echo would kill Mario again.
+        if self.server and self.server.socket:
+            logger.info("DeathLink: Sending death to your friends...")
+            self.last_death_link = time.time()
+            self.sent_death_times.append(self.last_death_link)
+            await self.send_msgs([{
+                "cmd": "Bounce", "tags": ["DeathLink"],
+                "data": {
+                    "time": self.last_death_link,
+                    "source": self.player_names[self.slot],
+                    "cause": death_text
+                }
+            }])
 
     def get_item_counts(self) -> collections.Counter[int]:
         """Received-item counts by item id, cached until the next ReceivedItems packet."""
@@ -316,9 +345,14 @@ def in_file_select():
     return dme.read_byte(addresses.SMS_CURRENT_STAGE) == 15
 
 
+def dolphin_connected(ctx: SmsContext) -> bool:
+    """Whether Dolphin is hooked into the SMS AP game."""
+    return ctx.dolphin_status == CONNECTION_CONNECTED_STATUS and dme.is_hooked()
+
+
 def dolphin_ready(ctx: SmsContext) -> bool:
     """Whether Dolphin is hooked into the SMS AP game and the client is in a slot."""
-    return ctx.slot is not None and ctx.dolphin_status == CONNECTION_CONNECTED_STATUS and dme.is_hooked()
+    return ctx.slot is not None and dolphin_connected(ctx)
 
 
 def dolphin_read_failed(ctx: SmsContext, message: str) -> None:
@@ -332,7 +366,7 @@ def dolphin_read_failed(ctx: SmsContext, message: str) -> None:
 
 async def game_watcher(ctx: SmsContext):
     while not ctx.exit_event.is_set():
-        if not dolphin_ready(ctx):
+        if not dolphin_connected(ctx):
             await asyncio.sleep(1)
             continue
 
@@ -343,7 +377,13 @@ async def game_watcher(ctx: SmsContext):
         # A failed Dolphin read must not end this task for the rest of the session: the client
         # would stay connected but silently stop sending checks and writing items.
         try:
-            await game_watcher_tick(ctx)
+            if ctx.slot is not None:
+                await game_watcher_tick(ctx)
+            elif "DeathLink" in ctx.tags:
+                # While the AP connection is down, still apply received DeathLinks and notice deaths.
+                await check_death(ctx)
+            else:
+                await asyncio.sleep(0.8)
         except Exception as e:
             dolphin_read_failed(ctx, f"SMS game watcher error: {e}")
 
@@ -362,7 +402,9 @@ async def game_watcher_tick(ctx: SmsContext):
     # ReceivedItems list back five times a second. Each packet re-runs Universal Tracker's
     # update, which leaks memory in its GUI, so long sessions grew to many GB (issue #66).
     # Sync only on /resync, and only send checks that are new.
-    new_locations = ctx.locations_checked - ctx.locations_sent
+    # Only locations this slot has; e.g. a boathouse trade without blue coin sanity maps to a
+    # location id the server doesn't know, and would otherwise be re-sent forever.
+    new_locations = (ctx.locations_checked & ctx.server_locations) - ctx.locations_sent
     if new_locations:
         ctx.locations_sent |= new_locations
         ctx.last_pending_resend = time.monotonic()
@@ -371,7 +413,7 @@ async def game_watcher_tick(ctx: SmsContext):
         # Re-send checks the server still hasn't confirmed, in case a send was dropped. This
         # doesn't trigger a ReceivedItems reply, so it can't bring the old packet storm back.
         ctx.last_pending_resend = time.monotonic()
-        pending = ctx.locations_checked - ctx.checked_locations
+        pending = (ctx.locations_checked & ctx.server_locations) - ctx.checked_locations
         if pending:
             await ctx.send_msgs([{"cmd": "LocationChecks", "locations": list(pending)}])
 
@@ -387,8 +429,8 @@ async def game_watcher_tick(ctx: SmsContext):
 
 async def check_death(ctx: SmsContext):
     """Send a DeathLink when Mario dies, and kill Mario for a received one once he's playable."""
-    if ctx.slot is None:
-        return
+    if ctx.unsent_death:
+        await send_mario_death(ctx)
 
     director = read_director()
     if director is None:
@@ -398,13 +440,8 @@ async def check_death(ctx: SmsContext):
     if game_state == DIRECTOR_STATE_MISS:
         # Only send a death that is ours, not the one a received DeathLink caused.
         if not ctx.has_send_death and not ctx.kill_written:
-            if not server_connected(ctx):
-                # Stay unsent; the next tick retries while the death animation lasts.
-                return
-            player_name = ctx.player_names[ctx.slot] if ctx.slot in ctx.player_names else "Player"
-            await ctx.send_death(f"{player_name} died!")
-            ctx.sent_death_times.append(ctx.last_death_link)
-            logger.info(f"Sent DeathLink: Mario died")
+            ctx.unsent_death = True
+            await send_mario_death(ctx)
 
         ctx.has_send_death = True
         # Whatever DeathLink was pending is satisfied by this death.
@@ -831,7 +868,21 @@ def read_director() -> Optional[int]:
 
 
 def server_connected(ctx: SmsContext) -> bool:
-    return ctx.server is not None and ctx.server.socket is not None and not ctx.server.socket.closed
+    return (ctx.slot is not None and ctx.server is not None and ctx.server.socket is not None
+            and not ctx.server.socket.closed)
+
+
+async def send_mario_death(ctx: SmsContext) -> None:
+    """Send Mario's death, or keep it (unsent_death) until the AP connection is back."""
+    if not server_connected(ctx):
+        return
+    player_name = ctx.player_names[ctx.slot] if ctx.slot in ctx.player_names else "Player"
+    try:
+        await ctx.send_death(f"{player_name} died!")
+    except websockets.exceptions.ConnectionClosed:
+        return
+    ctx.unsent_death = False
+    logger.info(f"Sent DeathLink: Mario died")
 
 
 def kill_mario(director: int) -> bool:
@@ -852,8 +903,12 @@ def kill_mario(director: int) -> bool:
         # it and e.g. lose the shine, so let it finish and try again on a later tick.
         return False
 
-    # Only write the low byte, so the per-frame bits in the high byte are left alone.
-    dme.write_byte(director + addresses.DIRECTOR_FLAGS_OFFSET + 1, (flags | DIRECTOR_FLAG_GAME_OVER_PENDING) & 0xFF)
+    # Only write the low byte, so the per-frame bits in the high byte are left alone. Re-read it
+    # first to narrow the window in which the game sets another event we would overwrite.
+    low_byte_address = director + addresses.DIRECTOR_FLAGS_OFFSET + 1
+    if dme.read_byte(low_byte_address) != flags & 0xFF:
+        return False
+    dme.write_byte(low_byte_address, (flags | DIRECTOR_FLAG_GAME_OVER_PENDING) & 0xFF)
     return True
 
 

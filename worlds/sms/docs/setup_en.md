@@ -11,7 +11,7 @@
 2. Download and install the latest release of Dolphin Emulator from the link above.
    - If you are on macOS, follow the [macOS code signing requirements](#macos-code-signing-requirements) instructions below
 
-3. Download the APWorld from the [releases](https://github.com/Joshark/archipelago-sms/releases/latest) page and place it in your `custom_worlds` folder located in your Archipelago install director
+3. Download the APWorld from the [releases](https://github.com/Alelau18/archipelago-sms/releases/latest) page and place it in your `custom_worlds` folder located in your Archipelago install director
 
 4. (Optional) If you have Universal Tracker (UT) make sure to place your yaml into your players folder to have access to UT in the SMS Client
 

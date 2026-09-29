@@ -46,7 +46,9 @@ class SuperMarioSunshineRandomizer:
 
         if AP_WORLD_VERSION_NAME in output_data:
             ap_world_version = output_data[AP_WORLD_VERSION_NAME]
-        if ap_world_version != CLIENT_VERSION:
+        # 0.6.2 patches are built the same way (the patcher hasn't changed since), so games already
+        # in progress on 0.6.2 can still be patched with this client.
+        if ap_world_version not in (CLIENT_VERSION, "0.6.2"):
             raise Utils.VersionException("Error! Server was generated with a different Super Mario Sunshine " +
                     f"APWorld version.\nThe client version is {CLIENT_VERSION}!\nPlease verify you are using the " +
                     f"same APWorld as the generator, which is '{ap_world_version}'")
