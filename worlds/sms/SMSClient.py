@@ -214,7 +214,10 @@ class SmsContext(SuperContext):
         logger.info(f"DeathLink received! Source: {source}")
         logger.info(f"DeathLink message: {cause}")
         logger.info("Killing Mario now...")
-        self.has_receive_death = kill_mario(self)
+        # Only expect the incoming death if Mario was actually killed; otherwise the flag stays set
+        # and the player's next real death is treated as this one and never sent. Never clear a
+        # flag an earlier, still-delayed kill is waiting on, or that death is sent back out.
+        self.has_receive_death = kill_mario(self) or self.has_receive_death
 
     def get_item_counts(self) -> collections.Counter[int]:
         """Received-item counts by item id, cached until the next ReceivedItems packet."""
